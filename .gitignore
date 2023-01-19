@@ -1,0 +1,12 @@
+.Rproj.user
+.Rproj
+.Rhistory
+.RData
+.Ruserdata
+
+mapbox-api.txt
+
+main_cache
+main_files/*
+
+.DS_Store

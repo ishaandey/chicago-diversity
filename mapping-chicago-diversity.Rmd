@@ -1,0 +1,85 @@
+---
+title: "Data & Diversity: A Perspective of Chicago's Neighborhoods"
+author: "[Ishaan Dey](https://github.com/ishaandey)"
+date: "January 2023 "
+# mail: "ishaan.dey@virginia.edu"
+# linkedin: "ishaan-dey"
+# github: "ishaandey"
+always_allow_html: yes
+output: 
+  html_document:
+    theme: 'lumen'
+    # css: 'nonparam-theme/resources/style.css'
+    toc: yes
+    toc_depth: 1
+    toc_float: yes
+    code_download: no
+    code_folding: hide
+    self_contained: true
+    df_print: paged
+    # includes:
+    #   in_header: 'nonparam-theme/resources/header_nonparam.html'
+    #   after_body: 'nonparam-theme/resources/footer_nonparam.html'
+---      
+
+```{r knitr.setup, include=FALSE}
+# knit options
+knitr::opts_chunk$set(include = T, message = F, warning = F,
+                      echo=F, eval=T, comment=NA, cache=F,
+                      rows.print=5
+                      #fig.height=4
+                      )
+```
+
+```{r include=F}
+source('mapping-chicago-diversity.R', local=knitr::knit_global())
+```
+
+
+# Population Maps {.tabset .tabset-fade}
+
+## Census Block Groups 
+```{r, include=T, out.width='100%'}
+m.pop.bg %>% addBoundaries()
+```
+
+## H3 Hexagons
+
+```{r, include=T, out.width='100%'}
+m.pop.h3 %>% addBoundaries()
+```
+
+# Diversity Maps {.tabset .tabset-fade}
+
+## Census Block Groups 
+```{r, include=T, out.width='100%'}
+m.di.bg %>% addBoundaries()
+```
+
+## H3 Hexagons
+
+```{r, include=T, out.width='100%'}
+m.di.h3 %>% addBoundaries()
+```
+
+
+# Race Prevalence Maps {.tabset .tabset-fade}
+
+## Census Block Groups 
+```{r, include=T, out.width='100%'}
+m.top1.bg 
+```
+
+```{r, include=T, out.width='100%'}
+m.top2.bg
+```
+
+## H3 Hexagons
+
+```{r, include=T, out.width='100%'}
+m.top1.h3
+```
+
+```{r, include=T, out.width='100%'}
+m.top2.h3
+```

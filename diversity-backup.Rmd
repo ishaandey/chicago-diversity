@@ -1,0 +1,527 @@
+---
+title: "Data & Diversity: A Perspective of Chicago's Neighborhoods"
+author: "[Ishaan Dey](https://github.com/ishaandey)"
+date: "January 2023 "
+# mail: "ishaan.dey@virginia.edu"
+# linkedin: "ishaan-dey"
+# github: "ishaandey"
+always_allow_html: yes
+output: 
+  html_document:
+    theme: 'lumen'
+    # css: 'nonparam-theme/resources/style.css'
+    toc: yes
+    toc_depth: 1
+    toc_float: yes
+    code_download: no
+    code_folding: hide
+    self_contained: true
+    df_print: paged
+    # includes:
+    #   in_header: 'nonparam-theme/resources/header_nonparam.html'
+    #   after_body: 'nonparam-theme/resources/footer_nonparam.html'
+---      
+
+```{r knitr.setup, include=FALSE}
+# knit options
+knitr::opts_chunk$set(include = T, message = F, warning = F,
+                      echo=F, eval=T, comment=NA, cache=F,
+                      rows.print=5
+                      #fig.height=4
+                      )
+```
+
+```{r package.imports}
+# standard packages for analysis
+library(tidyverse)
+library(lubridate)
+
+# for pulling census easily (no api key) 
+library(tidycensus)
+
+# some geo tools
+library(tigris)
+library(sf)
+library(h3jsr)
+
+# some map and display tools
+library(leaflet)
+library(leaflet.extras)
+library(leafsync)
+
+library(htmltools)
+library(widgetframe)
+```
+
+
+```{r utils, cache=F}
+source("utils/helpers.R")
+source("utils/processing.R")
+source("utils/visualization.R")
+```
+
+```{r define.race.vars}
+# B02001_001: Total
+# B03002_003: White alone (Not Hispanic or Latino)
+# B03002_004: Black or African American alone (Not Hispanic or Latino)
+# B03002_012: Hispanic or Latino
+# B03002_005: Native American alone (Not Hispanic or Latino)
+# B03002_006: Asian alone (Not Hispanic or Latino)
+# B03002_007: Native Hawaiian or Pacific Islander alone (Not Hispanic or Latino)
+# B03002_009: Multiple Races (Not Hispanic or Latino)
+# B03002_008: Other (Not Hispanic or Latino)
+
+race.vars <- c(pop.TOT = "B02001_001", 
+               pop.WHT = "B03002_003", 
+               pop.BLK = "B03002_004",
+               pop.HLT = "B03002_012", 
+               pop.NAM = "B03002_005", 
+               pop.ASN = "B03002_006", 
+               pop.HPI = "B03002_007", 
+               pop.MUL = "B03002_009", 
+               pop.OTH = "B03002_008")
+```
+
+```{r get.acs.data, cache=T}
+ACS_YEAR <- 2021
+
+# Get raw ACS data
+cook.acs.raw <- get_acs(geography = 'block group', year = ACS_YEAR, 
+                    variables = race.vars, 
+                    state=17, county=031, output = 'wide')
+```
+
+```{r make.cook.acs}
+cook.acs <- cook.acs.raw %>%
+  # remove margin estimates
+  dplyr::select(-ends_with('M')) #%>%
+  # # clean NA vs. NaNs
+  # mutate(pop.TOTE = na_if(pop.TOTE, 0)) %>% # need to move this later
+  # # define proportions
+  # mutate(prp.TOT = pop.TOTE / pop.TOTE, 
+  #        prp.WHT = pop.WHTE / pop.TOTE, 
+  #        prp.BLK = pop.BLKE / pop.TOTE, 
+  #        prp.HLT = pop.HLTE / pop.TOTE, 
+  #        prp.NAM = pop.NAME / pop.TOTE, 
+  #        prp.ASN = pop.ASNE / pop.TOTE, 
+  #        prp.HPI = pop.HPIE / pop.TOTE, 
+  #        prp.MUL = pop.MULE / pop.TOTE, 
+  #        prp.OTH = pop.OTHE / pop.TOTE) 
+```
+
+```{r make.cook.bg, include=F}
+# get block groups geoms
+cook.bg <- block_groups(state=17, county=031, cb=T, year=ACS_YEAR) %>% 
+  st_transform(crs='WGS84') %>% 
+  dplyr::select(GEOID, ALAND, AWATER)
+```
+
+```{r get.hexes}
+#  hex length of 10 corresponds to about 1 block, about 6-7 hexes of res 9 fit into the loop, one of hex 8 covers most of loop
+RES = 8 
+
+chi.bounds <- read_sf("data/chi-boundaries.geojson")
+chi.bounds.geojson <- readLines("data/chi-boundaries.geojson") %>% paste(collapse = "\n") 
+# chi.h3.all<- polygon_to_cells(chi.bounds, res=res, simple=F)
+# chi.h3 <- cell_to_polygon(unlist(chi.h3.all$h3_addresses), simple=F)
+
+cook.bounds <- read_sf("data/cook-boundaries.geojson")
+cook.h3.all<- polygon_to_cells(cook.bounds, res=RES, simple=F)
+cook.h3 <- cell_to_polygon(unlist(cook.h3.all$h3_addresses), simple=F)
+```
+
+```{r get.nbh}
+# get neighborhoods for chicago and cook -- chi is more granular but only covers city
+chi.nbh.geojson = readLines("data/chi-neighborhoods.geojson") %>% paste(collapse = "\n") 
+chi.nbh <- read_sf("data/chi-neighborhoods.geojson")
+cook.nbh <- read_sf("data/cook-neighborhoods.geojson")
+
+# Helper ---- 
+# leaflet(chi.nbh) %>%
+#   addProviderTiles('CartoDB.Positron')  %>%
+#   addPolygons(weight = 2, color='orange',
+#               label = ~ pri_neigh)
+```
+
+```{r make.cook.acs.bg}
+bg.matches <- get.neighborhoods(cook.bg, chi.nbh, cook.nbh, id_cols=c('GEOID'))
+
+cook.acs.bg <- cook.acs %>% 
+  left_join(bg.matches) %>% 
+  left_join(cook.bg, by=c('GEOID'), suffix=c('','_BG')) %>%
+  st_as_sf() %>%
+  st_transform(4326) # not needed i think
+```
+
+```{r interpolate.hex}
+cook.acs.bg.ext <- cook.acs.bg %>% dplyr::select(starts_with('pop.'), ALAND, AWATER)
+# cook.acs.bg.int <- cook.acs.bg %>% dplyr::select(starts_with('prp.'))
+
+cook.acs.h3.ext <- st_interpolate_aw(cook.acs.bg.ext, cook.h3, extensive = T, keep_NA=T)
+# cook.acs.h3.int <- st_interpolate_aw(cook.acs.bg.int, cook.h3, extensive = F, keep_NA=T)
+
+cook.acs.h3 <- bind_cols(cook.h3, 
+                         cook.acs.h3.ext %>% st_drop_geometry() %>% dplyr::select(-`Group.1`), 
+                         # cook.acs.h3.int %>% st_drop_geometry() %>% dplyr::select(-`Group.1`)
+                         ) %>% as_tibble() %>% st_as_sf() %>% st_transform(4326)
+
+```
+
+```{r make.cook.acs.h3}
+h3.matches <- get.neighborhoods(cook.h3, chi.nbh, cook.nbh, id_cols=c('h3_address'))
+
+cook.acs.h3 <- cook.acs.h3 %>% left_join(h3.matches) 
+```
+
+```{r do.math}
+#add shannon index or smth
+cook.data.bg <- cook.acs.bg %>% 
+  get.proportions %>% 
+  get.DI.score %>% 
+  get.prv.dif.scores(id_cols = c('GEOID','NAME')) %>% 
+  get.density()
+
+cook.data.h3 <- cook.acs.h3 %>% 
+  get.proportions %>% 
+  get.DI.score %>% 
+  get.prv.dif.scores(id_cols = c('h3_address')) %>% 
+  get.density()
+```
+
+```{r}
+# create chi.data.bg and chi.data.h3 by filtering geoms withing city boundaries
+```
+
+
+```{r rm.data}
+rm(cook.acs.bg.ext, cook.acs.bg.int, cook.acs.h3.ext, cook.acs.h3.int)
+rm(bg.matches, h3.matches)
+# rm(cook.acs.bg, cook.acs.h3)
+rm(cook.h3.all)
+```
+
+```{r mapbox}
+MAPBOX_TOKEN <- readLines('mapbox-api.txt')
+# api.request <- paste0("https://api.mapbox.com/styles/v1/mapbox/light-v10/tiles/256/9/-87.6331/41.8789?access_token=", MAPBOX_TOKEN)
+
+# addTiles(urlTemplate = api.request) %>%  # Add default OpenStreetMap map tiles
+```
+
+```{r basemap}
+basemap.bg <- leaflet(data=cook.data.bg) %>%
+  setView(lat=41.881832,lng=-87.623177, zoom = 10) %>%
+  addProviderTiles('CartoDB.Positron') %>% 
+  addMyResetMapButton()
+
+basemap.h3 <- leaflet(data=cook.data.h3) %>%
+  setView(lat=41.881832,lng=-87.623177, zoom = 10) %>%
+  addProviderTiles('CartoDB.Positron') %>% 
+  addMyResetMapButton()
+```
+
+```{r cmap}
+# https://coolors.co/2a7a9b-2e86ab-68618f-a23b72-f18f01-c73e1d-a43721-812f24-3b1f2b-4d333e
+
+N_BINS = 10
+
+max.alpha = .5 # controls seethrough strength, where 1 is fully opaque
+color.NA <- "#D3DADC" # CartoDB gray
+color.primary <- "#527CA2"
+# color.base <- "#F1E3D3"
+color.base <- "#ffffff"
+palette.diverging <- .c('#780000', '#c1121f', '#fdf0d5', '#003049', '#669bbc')
+palette.list <- c("#ca7016","#74aa9f","#5096b9","#bf7381", "#a292c8","#a292c8","#db9080","#5E6D97")
+
+
+cmap.scale <- colorNumeric(c(color.base,color.primary), min.max(1:101), na.color = color.NA) # for
+cmap.decile <- colorNumeric(c(color.base,color.primary), 1:N_BINS, na.color = color.NA) # for deciles
+cmap.den.bg <- colorNumeric(c(color.base,color.primary), log10(cook.data.bg$DENSITY), na.color = color.NA)
+cmap.den.h3 <- colorNumeric(c(color.base,color.primary), cook.data.h3$DENSITY, na.color = color.NA)
+# for population
+
+race.labels <- c('White', 'Black', 'Hispanic/Latino', 'Asian', 'Native American', 'Pacific Islander', 'Multiple', 'Other')
+# race.labels <- c('White only', 'Black only', 'Hispanic/Latino', 'Asian only', 'Native American only', 'Pacific Islander only', 'Multiple', 'Other')
+race.codes <-  c('WHT', 'BLK', 'HLT', 'ASN', 'NAM', 'HPI', 'MUL', 'OTH')
+race.lookup <- data.frame(cd = race.codes, lbl = race.labels)
+
+cmap.race <- colorFactor(palette = palette.list, levels = race.codes, na.color = color.NA)
+cmap.race.legend <- colorFactor(palette = palette.list, levels = race.labels, na.color = color.NA)
+
+```
+
+```{r bg.pop}
+labels <- paste0("<strong>Neighborhood/Township:</strong> ", cook.data.bg$DISPLAY_NAME,
+                 "<br><strong>Selected Population:</strong> ", prettify(cook.data.bg$pop.TOTE),
+                 "<br><strong>Selected Pop. Density:</strong> ", prettify(cook.data.bg$DENSITY), " persons/mi<sup>2</sup>"
+                 ) %>% lapply(htmltools::HTML)
+
+m.pop.bg <- basemap.bg %>%
+  addGeoJSON(chi.nbh.geojson, weight = 2, color = '000000', opacity = 1, fill = FALSE) %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.den.bg(log10(cook.data.bg$DENSITY)),
+    opacity = max.alpha,
+    fillOpacity = max.alpha,
+    label = ~ labels
+  ) %>%
+  addLegend(pal = cmap.den.bg, values = log10(cook.data.bg$DENSITY), 
+            title = htmltools::HTML("Population<br>Density<br>(persons/mi<sup>2</sup>)"),
+            opacity = max.alpha, na.label='No Data',  bins=4, data=10*c(1:5),
+            labFormat = labelFormat(transform = function(x) 10^x, 
+                                    digits=0)
+  )
+```
+
+```{r h3.pop}
+labels <- paste0("<strong>Neighborhood/Township:</strong> ", cook.data.h3$DISPLAY_NAME,
+                 "<br><strong>Selected Population:</strong> ", prettify(cook.data.h3$pop.TOTE),
+                 "<br><strong>Selected Pop. Density:</strong> ", prettify(cook.data.h3$DENSITY), " persons/mi<sup>2</sup>"
+                 ) %>% lapply(htmltools::HTML)
+
+m.pop.h3 <- basemap.h3 %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.den.h3(cook.data.h3$DENSITY),
+    opacity = max.alpha,
+    fillOpacity = max.alpha,
+    label = ~ labels
+  ) %>%
+  addGeoJSON(chi.bounds.geojson, weight = 1, color = "#595959", opacity = .8, fill = F) %>%
+  addLegend(pal = cmap.den.h3, values = cook.data.h3$DENSITY, 
+            title = htmltools::HTML("Population<br>Density<br>(persons/mi<sup>2</sup>)"),
+            opacity = max.alpha, na.label='No Data',  bins=5, data=0:1*1e6,
+            labFormat = labelFormat(digits=0)
+  )
+```
+
+```{r bg.di}
+cook.data.bg$DI.decile <- ntile(cook.data.bg$DI, 10)
+
+labels <- paste0("<strong>Area:</strong> ", cook.data.bg$DISPLAY_NAME,
+                 "<br><strong>DI:</strong> ", sprintf("%.2f", cook.data.bg$DI), 
+                 "<br><strong>Decile:</strong> ", sprintf("%i", cook.data.bg$DI.decile),
+                 "<br><strong>Total Pop.:</strong> ", prettyNum(cook.data.bg$pop.TOTE)
+                 ) %>% lapply(htmltools::HTML)
+
+m.di.bg <- basemap.bg %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.decile(cook.data.bg$DI.decile),
+    opacity = max.alpha,
+    label = ~ labels
+  ) %>%
+  addLegend(pal = cmap.decile, values = cook.data.bg$DI.decile, 
+            title = htmltools::HTML("Diversity Index <br>(Decile)"),
+            opacity = max.alpha,
+  )
+```
+
+
+
+```{r h3.di}
+cook.data.h3$DI.decile <- ntile(cook.data.h3$DI, 10)
+
+labels <- paste0("<strong>Area:</strong> ", cook.data.h3$DISPLAY_NAME,
+                 "<br><strong>DI:</strong> ", prettify.pct(cook.data.h3$DI), 
+                 "<br><strong>Decile:</strong> ", prettify.rank(cook.data.h3$DI.decile),
+                 "<br><strong>Population:</strong> ", prettify(cook.data.h3$pop.TOTE)
+                 ) %>% lapply(htmltools::HTML)
+
+m.di.h3 <- basemap.h3 %>%
+  addPolygons(
+    weight = 1,
+    # color = ~ cmap.scale(cook.data.h3$DI),
+    color = ~ cmap.decile(cook.data.h3$DI.decile),
+    opacity = max.alpha,
+    fillOpacity = ~ min.max(cook.data.h3$DI, max.alpha),
+    label = ~ labels
+  ) %>%
+  addLegend(title = htmltools::HTML("Diversity<br>Index<br>(Decile)"),
+            opacity = max.alpha,  
+            colors = cmap.decile(c(1,5,10)), labels = c('1st','5th','10th'),
+            # pal = cmap.decile, values = cook.data.h3$DI.decile,
+            # na.label='No Data', bins=5, data=1:10,
+            # labFormat = labelFormat(digits=0, suffix='th')
+  )
+```
+
+
+```{r bg.top1}
+labels <- paste0("<strong>Area:</strong> ", cook.data.bg$DISPLAY_NAME,
+                 "<br><strong>Race:</strong> ", cook.data.bg$RACE_PRV_TOP1 %>% prettify.race(race.lookup),
+                 "<br><strong>Pct.:</strong> ", prettify.pct(cook.data.bg$PRP_PRV_TOP1),
+                 "<br><strong>Total Pop.:</strong> ", prettify(cook.data.bg$pop.TOTE)
+                 ) %>% lapply(htmltools::HTML)
+
+m.top1.bg <- basemap.bg %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.race(RACE_PRV_TOP1),
+    opacity = max.alpha/2,
+    # opacity = ~ min.max(PRP_PRV_TOP1, max.alpha),
+    fillOpacity = ~ min.max(PRP_PRV_TOP1, max.alpha),
+    label = ~ labels
+    
+  ) %>%
+  addLegend(pal = cmap.race.legend, values = ~race.labels[1:4], 
+            title = htmltools::HTML("Prevailing Race"),
+            opacity = max.alpha,
+  )
+```
+
+```{r bg.top2}
+labels <- paste0("<strong>Area:</strong> ", cook.data.bg$DISPLAY_NAME,
+                 "<br><strong>Race:</strong> ", cook.data.bg$RACE_PRV_TOP2 %>% prettify.race(race.lookup),
+                 "<br><strong>Pct.:</strong> ", prettify.pct(cook.data.bg$PRP_PRV_TOP2,'%'),
+                 "<br><strong>Total Pop.:</strong> ", prettify(cook.data.bg$pop.TOTE)
+                 ) %>% lapply(htmltools::HTML)
+
+
+m.top2.bg <- basemap.bg %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.race(RACE_PRV_TOP2),
+    opacity = ~ min.max(PRP_PRV_TOP2, .2, .8),
+    label = ~ labels
+    
+  ) %>%
+  addLegend(pal = cmap.race, values = ~level_cd, 
+            title = htmltools::HTML("2nd-Most <br>Prevailing <br>Race"),
+            opacity = .8,
+  )
+```
+
+```{r bg.top3}
+labels <- paste0("<strong>Area:</strong> ", cook.data.bg$DISPLAY_NAME,
+                 "<br><strong>Race:</strong> ", cook.data.bg$RACE_PRV_TOP3 %>% prettify.race(race.lookup),
+                 "<br><strong>Pct.:</strong> ", sprintf("%.2f", cook.data.bg$PRP_PRV_TOP3),
+                 "<br><strong>Total Pop.:</strong> ", prettyNum(cook.data.bg$pop.TOTE)
+                 ) %>% lapply(htmltools::HTML)
+
+
+m.top3.bg <- basemap.bg %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.race(RACE_PRV_TOP3),
+    opacity = ~ min.max(PRP_PRV_TOP3, .2, .8),
+    label = ~ labels
+    
+  ) %>%
+  addLegend(pal = cmap.race, values = ~level_cd, 
+            title = htmltools::HTML("3rd-Most Prevailing Race"),
+            opacity = .8,
+  )
+```
+
+
+```{r h3.top1}
+labels <- paste0("<strong>Area:</strong> ", cook.data.h3$DISPLAY_NAME,
+                 "<br><strong>Race:</strong> ", cook.data.h3$RACE_PRV_TOP1,
+                 "<br><strong>Pct.:</strong> ", sprintf("%.2f", cook.data.h3$PRP_PRV_TOP1),
+                 "<br><strong>Pop.:</strong> ", sprintf("%.0f",cook.data.h3$pop.TOTE)
+                 ) %>% lapply(htmltools::HTML)
+
+m.top1.h3 <- basemap.h3 %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.race(RACE_PRV_TOP1),
+    fillOpacity = ~ min.max(PRP_PRV_TOP1, .2, .8),
+    label = ~ labels
+    
+  ) %>%
+  addLegend(pal = cmap.race.legend, values = ~level_cd, 
+            title = htmltools::HTML("Prevailing Race"),
+            opacity = .8,
+  )
+```
+
+```{r h3.top2}
+labels <- paste0("<strong>Area:</strong> ", cook.data.h3$DISPLAY_NAME,
+                 "<br><strong>Race:</strong> ", cook.data.h3$RACE_PRV_TOP2,
+                 "<br><strong>Pct.:</strong> ", sprintf("%.2f", cook.data.h3$PRP_PRV_TOP2),
+                 "<br><strong>Pop.:</strong> ", sprintf("%.0f",cook.data.h3$pop.TOTE)
+                 ) %>% lapply(htmltools::HTML)
+
+m.top2.h3 <- basemap.h3 %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.race(RACE_PRV_TOP2),
+    fillOpacity = ~ min.max(PRP_PRV_TOP2, .2, .8),
+    label = ~ labels
+    
+  ) %>%
+  addLegend(pal = cmap.race, values = ~level_cd, 
+            title = htmltools::HTML("2nd-Most Prevailing Race"),
+            opacity = .8,
+  )
+```
+
+
+```{r h3.top3}
+labels <- paste0("<strong>Area:</strong> ", cook.data.h3$DISPLAY_NAME,
+                 "<br><strong>Race:</strong> ", cook.data.h3$RACE_PRV_TOP3,
+                 "<br><strong>Pct.:</strong> ", sprintf("%.2f", cook.data.h3$PRP_PRV_TOP3),
+                 "<br><strong>Pop.:</strong> ", sprintf("%.0f",cook.data.h3$pop.TOTE)
+                 ) %>% lapply(htmltools::HTML)
+
+m.top3.h3 <- basemap.h3 %>%
+  addPolygons(
+    weight = 1,
+    color = ~ cmap.race(RACE_PRV_TOP3),
+    fillOpacity = ~ min.max(PRP_PRV_TOP3, .2, .8),
+    label = ~ labels
+    
+  ) %>%
+  addLegend(pal = cmap.race, values = ~level_cd, 
+            title = htmltools::HTML("3rd-Most Prevailing Race"),
+            opacity = .8,
+  )
+```
+
+
+# Displays {.tabset .tabset-fade}
+
+## Block Group 
+
+### Race Prevalence at the Census Block Group level
+
+```{r, out.width='100%'}
+sync(m.top1.bg %>% addMyResetMapButton(), 
+     m.top2.bg %>% addMyResetMapButton(), 
+     # m.top3.bg %>% addMyResetMapButton(),
+     sync.cursor = F, ncol = 2
+     )
+```
+
+<br><br>
+
+
+### Diversity Index by Block Group
+
+```{r, out.width='100%'}
+m.di.bg %>% addMyResetMapButton()
+
+```
+
+
+## Hex H3
+
+### Race Prevalence at the Census Block Group level
+
+```{r, out.width='100%'}
+sync(m.top1.h3 %>% addMyResetMapButton(), 
+     m.top2.h3 %>% addMyResetMapButton(), 
+     # m.top3.h3 %>% addMyResetMapButton(),
+     sync.cursor = F, ncol = 2
+     )
+```
+
+<br><br>
+
+### Diversity Index by Block Group
+
+```{r, out.width='100%'}
+m.di.h3 %>% addMyResetMapButton()
+
+```
+ 
